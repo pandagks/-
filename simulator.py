@@ -16,6 +16,7 @@ class Simulation:
         self.total_distance_across_runs = 0
         self.total_time_across_runs = 0
         self.fitness_all = []
+        self.abandoned_customers = 0
 
     def generate_customers(self):
         fixed_customers = load_fixed_customers()
@@ -26,7 +27,7 @@ class Simulation:
 
     def run(self):
         self.generate_customers()
-        self.buses.append(Bus(bus_id="Bus1", current_stop="00_오이도차고지", max_capacity=30))
+        self.buses.append(Bus(bus_id="Bus1", current_stop="00_오이도차고지", max_capacity=15))
 
         for hour in range(10, 17):
             hour_min = hour * 60
@@ -38,6 +39,29 @@ class Simulation:
             if not pairs:
                 continue
             stops_to_visit, fitness_with_return, distance, minutes = run_ga(pairs, verbose=True)
+            # 탑승/하차 인원 계산
+            boarding_count = {}
+            getoff_count = {}
+
+            for c in hourly_customers:
+                boarding_count[c.boarding_stop] = boarding_count.get(c.boarding_stop, 0) + 1
+                getoff_count[c.getoff_stop] = getoff_count.get(c.getoff_stop, 0) + 1
+
+            route_summary = []
+            for stop in stops_to_visit:
+                board = boarding_count.get(stop, 0)
+                drop = getoff_count.get(stop, 0)
+                label = stop
+                info = []
+                if board > 0:
+                    info.append(f"{board}승차")
+                if drop > 0:
+                    info.append(f"{drop}하차")
+                if info:
+                    label += f"({', '.join(info)})"
+                route_summary.append(label)
+
+            print(f"[{hour}시 사이클] 방문 경로: {' → '.join(route_summary)}")
             self.total_distance_across_runs += distance
             self.total_time_across_runs += minutes
             self.fitness_all.extend(fitness_with_return)
@@ -46,7 +70,7 @@ class Simulation:
             while remaining_customers:
                 if bus_index >= len(self.buses):
                     self.bus_counter += 1
-                    new_bus = Bus(bus_id=f"Bus{self.bus_counter}", current_stop="00_오이도차고지", max_capacity=30)
+                    new_bus = Bus(bus_id=f"Bus{self.bus_counter}", current_stop="00_오이도차고지", max_capacity=15)
                     self.buses.append(new_bus)
 
                 bus = self.buses[bus_index]
@@ -72,12 +96,25 @@ class Simulation:
 
                         waiting_list = list(self.waiting_customers.get(stop, []))
                         for c in waiting_list:
-                            if c.customer_id in hourly_ids and c.time <= self.current_time and bus.can_board_customer():
+                            wait_time = self.current_time - c.time
+                            if (
+                                c.customer_id in hourly_ids and 
+                                c.time <= self.current_time and 
+                                wait_time <= 45 and 
+                                bus.can_board_customer()
+                            ):
                                 bus.board_customer(c, self.current_time)
                                 self.waiting_customers[stop].remove(c)
                                 c.pickup_time = self.current_time
                                 hour, minute = divmod(self.current_time, 60)
                                 print(f"[{hour:02d}:{minute:02d}] {c.customer_id}번 고객이 {bus.bus_id} 버스에 탑승 (정류장: {stop}, 하차: {c.getoff_stop})")
+                            elif wait_time > 45:
+                                self.waiting_customers[stop].remove(c)
+                                self.abandoned_customers += 1
+                                remaining_customers = [x for x in remaining_customers if x.customer_id != c.customer_id]  # ⬅️ 이 줄 추가
+                                hour, minute = divmod(self.current_time, 60)
+                                print(f"[{hour:02d}:{minute:02d}] {c.customer_id}번 고객이 {stop}에서 대기 {wait_time}분 후 탑승 포기")
+
 
                     unfinished = {c.customer_id for c in remaining_customers if c.customer_id not in {cust.customer_id for cust, _ in bus.finished_customers}}
 
@@ -102,7 +139,23 @@ class Simulation:
                     print(f"[{hour:02d}:{minute:02d}] 버스들이 대기 없이 다음 정류장 이동 예정")
 
         print("\n=== 시뮬레이션 종료 ===")
+
         print("[GA 최종 요약]")
+        print("\n[고객별 대기 시간 요약]")
+        total_waiting = 0
+        count = 0
+        for customer in self.customers:
+            if hasattr(customer, 'pickup_time'):
+                wait = customer.pickup_time - customer.time
+                total_waiting += wait
+                count += 1
+                h, m = divmod(wait, 60)
+                print(f"Customer {customer.customer_id}: 대기 {wait}분 ({h:02d}:{m:02d})")
+        if count:
+            avg = total_waiting / count
+            h, m = divmod(int(avg), 60)
+            print(f"\n[평균 대기 시간] {avg:.2f}분 ({h:02d}:{m:02d}) - 총 {count}명")
+        print(f"\n[탑승 포기 고객 수] {self.abandoned_customers}명")
         print(f"총 누적 거리: {self.total_distance_across_runs:.2f} km")
         print(f"총 누적 시간: {self.total_time_across_runs}분")
         print(f"총 예상 비용: {calculate_cost(self.total_distance_across_runs):,}원")
