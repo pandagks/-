@@ -102,10 +102,6 @@ class Simulation:
                     print(f"[{hour:02d}:{minute:02d}] 버스들이 대기 없이 다음 정류장 이동 예정")
 
         print("\n=== 시뮬레이션 종료 ===")
-        if self.fitness_all:
-            print(f"  평균: {mean(self.fitness_all):.2f} km")
-            print(f"  표준편차: {stdev(self.fitness_all):.2f} km")
-            print(f"  초기: {self.fitness_all[0]:.2f} km → 최종: {self.fitness_all[-1]:.2f} km")
         print("[GA 최종 요약]")
         print(f"총 누적 거리: {self.total_distance_across_runs:.2f} km")
         print(f"총 누적 시간: {self.total_time_across_runs}분")
