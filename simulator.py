@@ -3,6 +3,7 @@ from customer import Customer
 from utils import get_distance_between, calculate_cost
 from bus import Bus
 from ga_optimizer import run_ga
+from statistics import mean, stdev
 import heapq
 
 class Simulation:
@@ -12,8 +13,9 @@ class Simulation:
         self.waiting_customers = {}
         self.current_time = 600  # 10:00부터 시작
         self.bus_counter = 1
-        self.total_distance = 0
-        self.total_time = 0
+        self.total_distance_across_runs = 0
+        self.total_time_across_runs = 0
+        self.fitness_all = []
 
     def generate_customers(self):
         fixed_customers = load_fixed_customers()
@@ -30,45 +32,57 @@ class Simulation:
             hour_min = hour * 60
             hourly_customers = [c for c in self.customers if hour_min <= c.time < hour_min + 60]
             hourly_ids = {c.customer_id for c in hourly_customers}
+            remaining_customers = hourly_customers.copy()
 
             pairs = [(c.boarding_stop, c.getoff_stop) for c in hourly_customers]
             if not pairs:
                 continue
+            stops_to_visit, fitness_with_return, distance, minutes = run_ga(pairs, verbose=True)
+            self.total_distance_across_runs += distance
+            self.total_time_across_runs += minutes
+            self.fitness_all.extend(fitness_with_return)
 
-            stops_to_visit, _, dist_sum, time_sum = run_ga(pairs, verbose=True)
-            self.total_distance += dist_sum
-            self.total_time += time_sum
+            bus_index = 0
+            while remaining_customers:
+                if bus_index >= len(self.buses):
+                    self.bus_counter += 1
+                    new_bus = Bus(bus_id=f"Bus{self.bus_counter}", current_stop="00_오이도차고지", max_capacity=30)
+                    self.buses.append(new_bus)
 
-            bus = self.buses[0]  # 단일 버스 운행
+                bus = self.buses[bus_index]
+                bus_index += 1
 
-            for i, stop in enumerate(stops_to_visit):
-                if i > 0:
-                    prev = stops_to_visit[i - 1]
-                    dist = get_distance_between(prev, stop)
-                    if dist is not None:
-                        bus.total_distance += dist
-                        self.current_time += int(dist * 3)
-                else:
-                    hour, minute = divmod(self.current_time, 60)
+                unfinished = {c.customer_id for c in remaining_customers}
+                while unfinished:
+                    for i, stop in enumerate(stops_to_visit):
+                        if i > 0:
+                            prev = stops_to_visit[i - 1]
+                            dist = get_distance_between(prev, stop)
+                            if dist is not None:
+                                bus.total_distance += dist
+                                self.current_time += int(dist * 3)
 
-                bus.current_stop = stop
+                        bus.current_stop = stop
 
-                dropped = bus.drop_customer(stop, self.current_time)
-                for c in dropped:
-                    c.dropoff_time = self.current_time
-                    hour, minute = divmod(self.current_time, 60)
-                    print(f"[{hour:02d}:{minute:02d}] {c.customer_id}번 고객이 {bus.bus_id} 버스에서 하차 (정류장: {stop})")
+                        dropped = bus.drop_customer(stop, self.current_time)
+                        for c in dropped:
+                            c.dropoff_time = self.current_time
+                            hour, minute = divmod(self.current_time, 60)
+                            print(f"[{hour:02d}:{minute:02d}] {c.customer_id}번 고객이 {bus.bus_id} 버스에서 하차 (정류장: {stop})")
 
-                waiting_list = list(self.waiting_customers.get(stop, []))
-                for c in waiting_list:
-                    if c.customer_id in hourly_ids and c.time <= self.current_time and bus.can_board_customer():
-                        bus.board_customer(c, self.current_time)
-                        self.waiting_customers[stop].remove(c)
-                        c.pickup_time = self.current_time
-                        hour, minute = divmod(self.current_time, 60)
-                        print(f"[{hour:02d}:{minute:02d}] {c.customer_id}번 고객이 {bus.bus_id} 버스에 탑승 (정류장: {stop}, 하차: {c.getoff_stop})")
+                        waiting_list = list(self.waiting_customers.get(stop, []))
+                        for c in waiting_list:
+                            if c.customer_id in hourly_ids and c.time <= self.current_time and bus.can_board_customer():
+                                bus.board_customer(c, self.current_time)
+                                self.waiting_customers[stop].remove(c)
+                                c.pickup_time = self.current_time
+                                hour, minute = divmod(self.current_time, 60)
+                                print(f"[{hour:02d}:{minute:02d}] {c.customer_id}번 고객이 {bus.bus_id} 버스에 탑승 (정류장: {stop}, 하차: {c.getoff_stop})")
 
-            bus.end_time = self.current_time
+                    unfinished = {c.customer_id for c in remaining_customers if c.customer_id not in {cust.customer_id for cust, _ in bus.finished_customers}}
+
+                bus.end_time = self.current_time
+                remaining_customers = [c for c in remaining_customers if all(c.customer_id != cust.customer_id for cust, _ in bus.finished_customers)]
 
             next_hour = (hour + 1) * 60 if hour < 16 else None
             if next_hour:
@@ -88,16 +102,14 @@ class Simulation:
                     print(f"[{hour:02d}:{minute:02d}] 버스들이 대기 없이 다음 정류장 이동 예정")
 
         print("\n=== 시뮬레이션 종료 ===")
+        if self.fitness_all:
+            print(f"  평균: {mean(self.fitness_all):.2f} km")
+            print(f"  표준편차: {stdev(self.fitness_all):.2f} km")
+            print(f"  초기: {self.fitness_all[0]:.2f} km → 최종: {self.fitness_all[-1]:.2f} km")
         print("[GA 최종 요약]")
-        print(f"총 누적 거리: {self.total_distance:.2f} km")
-        print(f"총 누적 시간: {self.total_time}분")
-        print(f"총 예상 비용: {calculate_cost(self.total_distance):,}원")
-
-    def get_stops_in_order(self, customers):
-        pairs = [(c.boarding_stop, c.getoff_stop) for c in customers]
-        if not pairs:
-            return []
-        return run_ga(pairs)[0]
+        print(f"총 누적 거리: {self.total_distance_across_runs:.2f} km")
+        print(f"총 누적 시간: {self.total_time_across_runs}분")
+        print(f"총 예상 비용: {calculate_cost(self.total_distance_across_runs):,}원")
 
 if __name__ == "__main__":
     sim = Simulation()
